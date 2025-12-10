@@ -1,0 +1,43 @@
+# ==============================================================================
+# AdventureWorksLT Data Simulator - Configuration
+# ==============================================================================
+# Copy this file to terraform.tfvars and fill in your values.
+# ==============================================================================
+
+# REQUIRED: Your Azure Subscription ID
+subscription_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# REQUIRED: Email of the admin user (must exist in Azure AD)
+admin_email = "your.email@example.com"
+
+# ==============================================================================
+# Optional: Customize these values or leave defaults
+# ==============================================================================
+
+# Azure region (default: "North Europe")
+# location = "West Europe"
+
+# Resource group name (default: "rg-adventureworks-simulator")
+# resource_group_name = "rg-adventureworks-simulator"
+
+# SQL Server name - must be globally unique! (default: "sql-adventureworks-sim")
+# Add a unique suffix like a random string to ensure global uniqueness
+sql_server_name = "sql-adventureworks-sim-abc123"
+
+# Key Vault name - must be globally unique! (default: "kv-awsim")
+# Add a unique suffix like a random string to ensure global uniqueness
+key_vault_name = "kv-awsim-abc123"
+
+# Enable/disable the simulation Logic Apps (default: true)
+# Set to false to pause simulation and reduce costs
+simulation_enabled = true
+
+# Simulation interval in minutes (default: 5)
+# simulation_interval_minutes = 10
+
+# Additional tags (optional)
+# tags = {
+#   Owner       = "Your Name"
+#   CostCenter  = "12345"
+#   Environment = "Development"
+# }

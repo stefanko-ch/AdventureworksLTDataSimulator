@@ -1,0 +1,432 @@
+# ==============================================================================
+# Automatic SQL Setup using MSSQL Provider
+# ==============================================================================
+# This file creates SQL users and stored procedures automatically during
+# Terraform deployment - no manual SQL execution needed!
+# ==============================================================================
+
+# ==============================================================================
+# SQL Users
+# ==============================================================================
+
+# Writer User (for Logic Apps simulation)
+resource "mssql_user" "writer" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+  
+  database  = azurerm_mssql_database.adventureworks_live.name
+  username  = "dbwriter"
+  password  = random_password.writer_password.result
+  roles     = ["db_datareader", "db_datawriter"]
+
+  depends_on = [
+    azurerm_mssql_database.adventureworks_live,
+    azurerm_mssql_firewall_rule.allow_all
+  ]
+}
+
+# Reader User (for external applications like Databricks)
+resource "mssql_user" "reader" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+  
+  database  = azurerm_mssql_database.adventureworks_live.name
+  username  = "dbreader"
+  password  = random_password.reader_password.result
+  roles     = ["db_datareader"]
+
+  depends_on = [
+    azurerm_mssql_database.adventureworks_live,
+    azurerm_mssql_firewall_rule.allow_all
+  ]
+}
+
+# ==============================================================================
+# SQL Scripts Execution via null_resource
+# ==============================================================================
+# The betr-io/mssql provider only supports user management.
+# We use null_resource with local-exec to run SQL scripts.
+# ==============================================================================
+
+resource "null_resource" "sql_procedures" {
+  triggers = {
+    server_id    = azurerm_mssql_server.main.id
+    database_id  = azurerm_mssql_database.adventureworks_live.id
+    script_hash  = filemd5("${path.module}/sql_simulation_procedures.sql")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      sqlcmd -S ${azurerm_mssql_server.main.fully_qualified_domain_name} \
+             -d ${azurerm_mssql_database.adventureworks_live.name} \
+             -U ${azurerm_mssql_server.main.administrator_login} \
+             -P '${random_password.sql_admin_password.result}' \
+             -i ${path.module}/sql_simulation_procedures.sql
+    EOT
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      sqlcmd -S ${azurerm_mssql_server.main.fully_qualified_domain_name} \
+             -d ${azurerm_mssql_database.adventureworks_live.name} \
+             -U ${azurerm_mssql_server.main.administrator_login} \
+             -P '${random_password.sql_admin_password.result}' \
+             -Q "GRANT EXECUTE ON SCHEMA::SalesLT TO [dbwriter]"
+    EOT
+  }
+
+  depends_on = [
+    mssql_user.writer,
+    mssql_user.reader,
+    azurerm_mssql_firewall_rule.allow_all
+  ]
+}
+
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_GenerateNewOrders') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_GenerateNewOrders
+        @OrderCount INT = 100
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        
+        DECLARE @i INT = 0;
+        DECLARE @CustomerID INT;
+        DECLARE @AddressID INT;
+        DECLARE @SalesOrderID INT;
+        DECLARE @OrderDate DATETIME = GETDATE();
+        DECLARE @DueDate DATETIME = DATEADD(DAY, 12, GETDATE());
+        DECLARE @LineCount INT;
+        DECLARE @j INT;
+        DECLARE @ProductID INT;
+        DECLARE @UnitPrice MONEY;
+        DECLARE @OrderQty SMALLINT;
+        DECLARE @Discount MONEY;
+        DECLARE @SubTotal MONEY;
+        
+        DECLARE @InsertedOrders TABLE (SalesOrderID INT);
+        DECLARE @ShipMethods TABLE (Method NVARCHAR(50));
+        INSERT INTO @ShipMethods VALUES ('CARGO TRANSPORT 5'), ('STANDARD SHIPPING'), ('EXPRESS DELIVERY'), ('OVERNIGHT');
+        
+        WHILE @i < @OrderCount
+        BEGIN
+            SELECT TOP 1 @CustomerID = CustomerID FROM SalesLT.Customer ORDER BY NEWID();
+            SELECT TOP 1 @AddressID = a.AddressID FROM SalesLT.Address a
+                LEFT JOIN SalesLT.CustomerAddress ca ON a.AddressID = ca.AddressID AND ca.CustomerID = @CustomerID
+                ORDER BY CASE WHEN ca.CustomerID IS NOT NULL THEN 0 ELSE 1 END, NEWID();
+            
+            SET @SubTotal = 0;
+            
+            INSERT INTO SalesLT.SalesOrderHeader (
+                RevisionNumber, OrderDate, DueDate, ShipDate, Status, OnlineOrderFlag,
+                PurchaseOrderNumber, AccountNumber, CustomerID, ShipToAddressID, BillToAddressID,
+                ShipMethod, CreditCardApprovalCode, SubTotal, TaxAmt, Freight, Comment, ModifiedDate
+            )
+            OUTPUT inserted.SalesOrderID INTO @InsertedOrders
+            SELECT 0, @OrderDate, @DueDate, NULL, 1, 1,
+                'PO' + CAST(ABS(CHECKSUM(NEWID())) % 100000 AS VARCHAR(10)),
+                '10-4030-' + RIGHT('000000' + CAST(ABS(CHECKSUM(NEWID())) % 1000000 AS VARCHAR(6)), 6),
+                @CustomerID, @AddressID, @AddressID,
+                (SELECT TOP 1 Method FROM @ShipMethods ORDER BY NEWID()),
+                CAST(ABS(CHECKSUM(NEWID())) % 1000000 AS VARCHAR(15)),
+                0, 0, 0, 'Simulated order', GETDATE();
+            
+            SELECT TOP 1 @SalesOrderID = SalesOrderID FROM @InsertedOrders;
+            DELETE FROM @InsertedOrders;
+            
+            IF @SalesOrderID IS NOT NULL
+            BEGIN
+                SET @LineCount = 1 + ABS(CHECKSUM(NEWID())) % 5;
+                SET @j = 0;
+                WHILE @j < @LineCount
+                BEGIN
+                    SELECT TOP 1 @ProductID = ProductID, @UnitPrice = ListPrice FROM SalesLT.Product WHERE ListPrice > 0 ORDER BY NEWID();
+                    SET @OrderQty = 1 + ABS(CHECKSUM(NEWID())) % 10;
+                    SET @Discount = CASE WHEN ABS(CHECKSUM(NEWID())) % 10 < 2 THEN 0.10 ELSE 0.00 END;
+                    INSERT INTO SalesLT.SalesOrderDetail (SalesOrderID, OrderQty, ProductID, UnitPrice, UnitPriceDiscount, ModifiedDate)
+                    VALUES (@SalesOrderID, @OrderQty, @ProductID, @UnitPrice, @Discount, GETDATE());
+                    SET @SubTotal = @SubTotal + (@OrderQty * @UnitPrice * (1 - @Discount));
+                    SET @j = @j + 1;
+                END
+                UPDATE SalesLT.SalesOrderHeader SET SubTotal = @SubTotal, TaxAmt = ROUND(@SubTotal * 0.08, 2), Freight = ROUND(@SubTotal * 0.025, 2), ModifiedDate = GETDATE() WHERE SalesOrderID = @SalesOrderID;
+            END
+            SET @i = @i + 1;
+        END
+        SELECT @OrderCount AS OrdersCreated, GETDATE() AS ExecutedAt;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_GenerateNewOrders"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
+
+# 2. Ship Pending Orders
+resource "mssql_script" "proc_ship_orders" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_ShipPendingOrders') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_ShipPendingOrders
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        DECLARE @ShippedCount INT;
+        UPDATE SalesLT.SalesOrderHeader SET Status = 5, ShipDate = GETDATE(), RevisionNumber = RevisionNumber + 1, ModifiedDate = GETDATE() WHERE Status = 1 AND ABS(CHECKSUM(NEWID())) % 100 < 50;
+        SET @ShippedCount = @@ROWCOUNT;
+        SELECT @ShippedCount AS OrdersShipped, GETDATE() AS ExecutedAt;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_ShipPendingOrders"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
+
+# 3. Update Customer Info
+resource "mssql_script" "proc_update_customers" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_UpdateCustomerInfo') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_UpdateCustomerInfo
+        @UpdateCount INT = 20
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        DECLARE @AreaCodes TABLE (Code VARCHAR(3));
+        INSERT INTO @AreaCodes VALUES ('415'), ('650'), ('510'), ('408'), ('925'), ('707'), ('831'), ('209');
+        UPDATE c SET Phone = (SELECT TOP 1 Code FROM @AreaCodes ORDER BY NEWID()) + '-' + RIGHT('000' + CAST(ABS(CHECKSUM(NEWID())) % 1000 AS VARCHAR(3)), 3) + '-' + RIGHT('0000' + CAST(ABS(CHECKSUM(NEWID())) % 10000 AS VARCHAR(4)), 4), ModifiedDate = GETDATE() FROM SalesLT.Customer c WHERE c.CustomerID IN (SELECT TOP (@UpdateCount) CustomerID FROM SalesLT.Customer ORDER BY NEWID());
+        SELECT @UpdateCount AS CustomersUpdated, GETDATE() AS ExecutedAt;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_UpdateCustomerInfo"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
+
+# 4. Generate New Customers
+resource "mssql_script" "proc_new_customers" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_GenerateNewCustomers') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_GenerateNewCustomers
+        @MinCount INT = 10,
+        @MaxCount INT = 20
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        DECLARE @CustomerCount INT = @MinCount + ABS(CHECKSUM(NEWID())) % (@MaxCount - @MinCount + 1);
+        DECLARE @i INT = 0, @CustomerID INT, @AddressID INT, @FirstName NVARCHAR(50), @LastName NVARCHAR(50);
+        DECLARE @InsertedCustomers TABLE (CustomerID INT);
+        DECLARE @InsertedAddresses TABLE (AddressID INT);
+        
+        DECLARE @FirstNames TABLE (Name NVARCHAR(50));
+        INSERT INTO @FirstNames VALUES ('Emma'),('Liam'),('Olivia'),('Noah'),('Ava'),('Oliver'),('Sophia'),('James'),('Mia'),('William'),('Charlotte'),('Lucas'),('Harper'),('Henry'),('Ella'),('Daniel'),('Chloe'),('David'),('Grace');
+        
+        DECLARE @LastNames TABLE (Name NVARCHAR(50));
+        INSERT INTO @LastNames VALUES ('Smith'),('Johnson'),('Williams'),('Brown'),('Jones'),('Garcia'),('Miller'),('Davis'),('Martinez'),('Lopez'),('Wilson'),('Anderson'),('Thomas'),('Taylor'),('Moore');
+        
+        DECLARE @Cities TABLE (City NVARCHAR(30), StateProvince NVARCHAR(50), PostalCode NVARCHAR(15));
+        INSERT INTO @Cities VALUES ('San Francisco','California','94102'),('Los Angeles','California','90001'),('Seattle','Washington','98101'),('Denver','Colorado','80201'),('Phoenix','Arizona','85001'),('Austin','Texas','78701'),('Chicago','Illinois','60601'),('New York','New York','10001'),('Boston','Massachusetts','02101');
+        
+        DECLARE @Streets TABLE (Street NVARCHAR(60));
+        INSERT INTO @Streets VALUES ('Main Street'),('Oak Avenue'),('Maple Drive'),('Cedar Lane'),('Pine Road'),('Elm Street'),('Park Avenue'),('Lake Drive');
+        
+        DECLARE @SalesPersons TABLE (Name NVARCHAR(256));
+        INSERT INTO @SalesPersons SELECT DISTINCT SalesPerson FROM SalesLT.Customer WHERE SalesPerson IS NOT NULL;
+        
+        WHILE @i < @CustomerCount
+        BEGIN
+            SELECT TOP 1 @FirstName = Name FROM @FirstNames ORDER BY NEWID();
+            SELECT TOP 1 @LastName = Name FROM @LastNames ORDER BY NEWID();
+            
+            INSERT INTO SalesLT.Customer (NameStyle, Title, FirstName, MiddleName, LastName, CompanyName, SalesPerson, EmailAddress, Phone, PasswordHash, PasswordSalt, ModifiedDate)
+            OUTPUT inserted.CustomerID INTO @InsertedCustomers
+            SELECT 0, CASE ABS(CHECKSUM(NEWID())) % 3 WHEN 0 THEN 'Mr.' WHEN 1 THEN 'Ms.' ELSE NULL END, @FirstName, NULL, @LastName,
+                CASE WHEN ABS(CHECKSUM(NEWID())) % 2 = 0 THEN @LastName + ' Inc.' ELSE NULL END,
+                (SELECT TOP 1 Name FROM @SalesPersons ORDER BY NEWID()),
+                LOWER(@FirstName) + '.' + LOWER(@LastName) + '@adventure-works.com',
+                '415-' + RIGHT('000' + CAST(ABS(CHECKSUM(NEWID())) % 1000 AS VARCHAR(3)), 3) + '-' + RIGHT('0000' + CAST(ABS(CHECKSUM(NEWID())) % 10000 AS VARCHAR(4)), 4),
+                CONVERT(VARCHAR(128), HASHBYTES('SHA2_256', CAST(NEWID() AS VARCHAR(36))), 2),
+                SUBSTRING(CONVERT(VARCHAR(36), NEWID()), 1, 10), GETDATE();
+            
+            SELECT TOP 1 @CustomerID = CustomerID FROM @InsertedCustomers;
+            DELETE FROM @InsertedCustomers;
+            
+            IF @CustomerID IS NOT NULL
+            BEGIN
+                INSERT INTO SalesLT.Address (AddressLine1, City, StateProvince, CountryRegion, PostalCode, ModifiedDate)
+                OUTPUT inserted.AddressID INTO @InsertedAddresses
+                SELECT TOP 1 CAST(100 + ABS(CHECKSUM(NEWID())) % 9900 AS VARCHAR(10)) + ' ' + Street, City, StateProvince, 'United States', PostalCode, GETDATE()
+                FROM @Cities c CROSS JOIN @Streets s ORDER BY NEWID();
+                
+                SELECT TOP 1 @AddressID = AddressID FROM @InsertedAddresses;
+                DELETE FROM @InsertedAddresses;
+                
+                IF @AddressID IS NOT NULL
+                BEGIN
+                    INSERT INTO SalesLT.CustomerAddress (CustomerID, AddressID, AddressType, ModifiedDate) VALUES (@CustomerID, @AddressID, 'Main Office', GETDATE());
+                END
+            END
+            SET @i = @i + 1;
+        END
+        SELECT @CustomerCount AS CustomersCreated, GETDATE() AS ExecutedAt;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_GenerateNewCustomers"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
+
+# 5. Cancel Random Orders
+resource "mssql_script" "proc_cancel_orders" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_CancelRandomOrders') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_CancelRandomOrders
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        DECLARE @CancelledCount INT;
+        DECLARE @OrdersToCancel TABLE (SalesOrderID INT);
+        INSERT INTO @OrdersToCancel SELECT SalesOrderID FROM SalesLT.SalesOrderHeader WHERE Status = 1 AND ABS(CHECKSUM(NEWID())) % 100 < 10;
+        SET @CancelledCount = @@ROWCOUNT;
+        DELETE FROM SalesLT.SalesOrderDetail WHERE SalesOrderID IN (SELECT SalesOrderID FROM @OrdersToCancel);
+        DELETE FROM SalesLT.SalesOrderHeader WHERE SalesOrderID IN (SELECT SalesOrderID FROM @OrdersToCancel);
+        SELECT @CancelledCount AS OrdersCancelled, GETDATE() AS ExecutedAt;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_CancelRandomOrders"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
+
+# 6. Get Status
+resource "mssql_script" "proc_get_status" {
+  server {
+    host = azurerm_mssql_server.main.fully_qualified_domain_name
+    port = 1433
+    login {
+      username = azurerm_mssql_server.main.administrator_login
+      password = random_password.sql_admin_password.result
+    }
+  }
+
+  database = azurerm_mssql_database.adventureworks_live.name
+
+  read_script = <<-SQL
+    SELECT CASE WHEN OBJECT_ID('SalesLT.usp_Sim_GetStatus') IS NOT NULL 
+           THEN 'exists' ELSE 'not_exists' END AS status
+  SQL
+
+  create_script = <<-SQL
+    CREATE OR ALTER PROCEDURE SalesLT.usp_Sim_GetStatus
+    AS
+    BEGIN
+        SET NOCOUNT ON;
+        SELECT 
+            (SELECT COUNT(*) FROM SalesLT.Customer) AS TotalCustomers,
+            (SELECT COUNT(*) FROM SalesLT.Address) AS TotalAddresses,
+            (SELECT COUNT(*) FROM SalesLT.SalesOrderHeader) AS TotalOrders,
+            (SELECT COUNT(*) FROM SalesLT.SalesOrderHeader WHERE Status = 1) AS PendingOrders,
+            (SELECT COUNT(*) FROM SalesLT.SalesOrderHeader WHERE Status = 5) AS ShippedOrders,
+            (SELECT COUNT(*) FROM SalesLT.SalesOrderDetail) AS TotalOrderLines,
+            GETDATE() AS CurrentTime;
+    END
+  SQL
+
+  delete_script = "DROP PROCEDURE IF EXISTS SalesLT.usp_Sim_GetStatus"
+  update_script = ""
+
+  depends_on = [azurerm_mssql_database.adventureworks_live, azurerm_mssql_firewall_rule.allow_all]
+}
