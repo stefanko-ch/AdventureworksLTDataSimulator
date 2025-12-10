@@ -11,6 +11,8 @@ Deploy a **live, self-updating AdventureWorksLT database** on Azure with Terrafo
 - **Incremental loading** patterns
 - **ETL/ELT** practice
 
+📝 **[Read the full blog post on Medium](https://stefanko-ch.medium.com/building-a-live-data-simulator-for-data-engineering-practice-10d924720492)**
+
 > **⚠️ WARNING**
 > 
 > This setup is for **DEMO/LEARNING only**. Don't use it in production!
